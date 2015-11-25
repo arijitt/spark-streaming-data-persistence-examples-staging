@@ -22,21 +22,13 @@ import java.sql.{Statement, Connection, DriverManager}
 import com.microsoft.spark.streaming.examples.arguments.{EventhubsArgumentKeys, EventhubsArgumentParser}
 import com.microsoft.spark.streaming.examples.common.{EventContent, StreamStatistics}
 import org.apache.spark._
+import org.apache.spark.sql.SQLContext
 import org.apache.spark.streaming.eventhubs.EventHubsUtils
 import org.apache.spark.streaming.{Seconds, StreamingContext}
 
 object EventhubsToAzureSQLTable {
 
-  def getSqlConnection(sqlServerFQDN: String, sqlDatabaseName: String,
-                       databaseUsername: String, databasePassword: String): Connection = {
-
-    val serverName = sqlServerFQDN.split('.')(0)
-    val certificateHostname = sqlServerFQDN.replace(serverName, "*")
-    val serverPort = "1433"
-
-    val sqlDatabaseConnectionString = f"jdbc:sqlserver://$sqlServerFQDN:$serverPort;database=$sqlDatabaseName;" +
-      f"user=$databaseUsername@$serverName;password=$databasePassword;" +
-      f"encrypt=true;hostNameInCertificate=$certificateHostname;loginTimeout=30;"
+  def getSqlConnection(sqlDatabaseConnectionString: String): Connection = {
 
     Class.forName("com.microsoft.sqlserver.jdbc.SQLServerDriver")
 
@@ -79,20 +71,23 @@ object EventhubsToAzureSQLTable {
       "eventhubs.checkpoint.dir" -> inputOptions(Symbol(EventhubsArgumentKeys.CheckpointDirectory)).asInstanceOf[String]
     )
 
-    val sqlTableName: String = inputOptions(Symbol(EventhubsArgumentKeys.EventSQLTable)).asInstanceOf[String]
-
-    val sqlDriverConnection: Connection = getSqlConnection(
+    val sqlDatabaseConnectionString : String = getSqlConnectionString(
       inputOptions(Symbol(EventhubsArgumentKeys.SQLServerFQDN)).asInstanceOf[String],
       inputOptions(Symbol(EventhubsArgumentKeys.SQLDatabaseName)).asInstanceOf[String],
       inputOptions(Symbol(EventhubsArgumentKeys.DatabaseUsername)).asInstanceOf[String],
       inputOptions(Symbol(EventhubsArgumentKeys.DatabasePassword)).asInstanceOf[String])
 
+    val sqlTableName: String = inputOptions(Symbol(EventhubsArgumentKeys.EventSQLTable)).asInstanceOf[String]
+
+    val sqlDriverConnection: Connection = getSqlConnection(sqlDatabaseConnectionString)
+
     sqlDriverConnection.setAutoCommit(false)
     val sqlDriverStatement: Statement = sqlDriverConnection.createStatement()
     sqlDriverStatement.addBatch(f"IF NOT EXISTS(SELECT * FROM sys.objects WHERE object_id" +
       f" = OBJECT_ID(N'[dbo].[$sqlTableName]') AND type in (N'U'))" +
-      f"\nCREATE TABLE $sqlTableName(EventBody NVARCHAR(128) NOT NULL)")
-    sqlDriverStatement.addBatch(s"CREATE CLUSTERED INDEX IX_EventBody ON $sqlTableName(EventBody)")
+      f"\nCREATE TABLE $sqlTableName(EventDetails NVARCHAR(128) NOT NULL)")
+    sqlDriverStatement.addBatch(f"IF IndexProperty(Object_Id('EventContent'), 'IX_EventDetails', 'IndexId') IS NULL" +
+      f"\nCREATE CLUSTERED INDEX IX_EventDetails ON $sqlTableName(EventDetails)")
     sqlDriverStatement.executeBatch()
     sqlDriverConnection.commit()
 
@@ -110,33 +105,14 @@ object EventhubsToAzureSQLTable {
     val eventHubsWindowedStream = eventHubsStream
       .window(Seconds(inputOptions(Symbol(EventhubsArgumentKeys.BatchIntervalInSeconds)).asInstanceOf[Int]))
 
+    val sqlContext = new SQLContext(sparkContext)
+
+    import sqlContext.implicits._
+
+    import com.microsoft.spark.streaming.examples.common.DataFrameExtensions._
+
     eventHubsWindowedStream.map(m => EventContent(new String(m)))
-      .foreachRDD { rdd =>
-        rdd.foreachPartition { partition =>
-          val sqlExecutorConnection: Connection = getSqlConnection(
-            inputOptions(Symbol(EventhubsArgumentKeys.SQLServerFQDN)).asInstanceOf[String],
-            inputOptions(Symbol(EventhubsArgumentKeys.SQLDatabaseName)).asInstanceOf[String],
-            inputOptions(Symbol(EventhubsArgumentKeys.DatabaseUsername)).asInstanceOf[String],
-            inputOptions(Symbol(EventhubsArgumentKeys.DatabasePassword)).asInstanceOf[String])
-
-          //Batch size of 1000 is used since Azure SQL database cannot insert more that 1000 rows at the same time.
-
-          partition.grouped(1000).foreach {
-            group =>
-
-              val eventString: scala.collection.mutable.StringBuilder = new scala.collection.mutable.StringBuilder()
-
-              group.foreach {
-                record => eventString.append("('" + record.messageBody + "'),")
-              }
-
-              sqlExecutorConnection.createStatement()
-                .executeUpdate(f"INSERT INTO [dbo].[$sqlTableName] VALUES " + eventString.stripSuffix(","))
-          }
-
-          sqlExecutorConnection.close()
-        }
-      }
+      .foreachRDD { rdd => rdd.toDF().insertToAzureSql(sqlDatabaseConnectionString, sqlTableName) }
 
     // Count number of events received the past batch
 
