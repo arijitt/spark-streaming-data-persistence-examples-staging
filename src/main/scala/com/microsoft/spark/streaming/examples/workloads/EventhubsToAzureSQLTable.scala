@@ -20,7 +20,7 @@ package com.microsoft.spark.streaming.examples.workloads
 import java.sql.{Statement, Connection, DriverManager}
 
 import com.microsoft.spark.streaming.examples.arguments.{EventhubsArgumentKeys, EventhubsArgumentParser}
-import com.microsoft.spark.streaming.examples.common.{EventContent, StreamStatistics}
+import com.microsoft.spark.streaming.examples.common.{StreamUtilities, EventContent, StreamStatistics}
 import org.apache.spark._
 import org.apache.spark.sql.SQLContext
 import org.apache.spark.streaming.eventhubs.EventHubsUtils
@@ -28,31 +28,7 @@ import org.apache.spark.streaming.{Seconds, StreamingContext}
 
 object EventhubsToAzureSQLTable {
 
-  def getSqlConnection(sqlDatabaseConnectionString: String): Connection = {
-
-    Class.forName("com.microsoft.sqlserver.jdbc.SQLServerDriver")
-
-    val sqlConnection:Connection = DriverManager.getConnection(sqlDatabaseConnectionString)
-
-    sqlConnection
-  }
-
-  def getSqlConnectionString(sqlServerFQDN: String, sqlDatabaseName: String,
-                       databaseUsername: String, databasePassword: String): String = {
-
-    val serverName = sqlServerFQDN.split('.')(0)
-    val certificateHostname = sqlServerFQDN.replace(serverName, "*")
-    val serverPort = "1433"
-
-    val sqlDatabaseConnectionString = f"jdbc:sqlserver://$sqlServerFQDN:$serverPort;database=$sqlDatabaseName;" +
-      f"user=$databaseUsername@$serverName;password=$databasePassword;" +
-      f"encrypt=true;hostNameInCertificate=$certificateHostname;loginTimeout=30;"
-
-    sqlDatabaseConnectionString
-  }
-
   def main(inputArguments: Array[String]): Unit = {
-
 
     val inputOptions = EventhubsArgumentParser.parseArguments(Map(), inputArguments.toList)
 
@@ -71,7 +47,7 @@ object EventhubsToAzureSQLTable {
       "eventhubs.checkpoint.dir" -> inputOptions(Symbol(EventhubsArgumentKeys.CheckpointDirectory)).asInstanceOf[String]
     )
 
-    val sqlDatabaseConnectionString : String = getSqlConnectionString(
+    val sqlDatabaseConnectionString : String = StreamUtilities.getSqlJdbcConnectionString(
       inputOptions(Symbol(EventhubsArgumentKeys.SQLServerFQDN)).asInstanceOf[String],
       inputOptions(Symbol(EventhubsArgumentKeys.SQLDatabaseName)).asInstanceOf[String],
       inputOptions(Symbol(EventhubsArgumentKeys.DatabaseUsername)).asInstanceOf[String],
@@ -79,7 +55,7 @@ object EventhubsToAzureSQLTable {
 
     val sqlTableName: String = inputOptions(Symbol(EventhubsArgumentKeys.EventSQLTable)).asInstanceOf[String]
 
-    val sqlDriverConnection: Connection = getSqlConnection(sqlDatabaseConnectionString)
+    val sqlDriverConnection: Connection =  DriverManager.getConnection(sqlDatabaseConnectionString)
 
     sqlDriverConnection.setAutoCommit(false)
     val sqlDriverStatement: Statement = sqlDriverConnection.createStatement()
